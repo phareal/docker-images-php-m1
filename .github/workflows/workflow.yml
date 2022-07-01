@@ -27,4 +27,4 @@ jobs:
         with:
           platforms: linux/arm64
           push: true
-          tags: phareal/php-m1:latest
+          tags: phareal/node-m1:latest

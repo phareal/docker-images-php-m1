@@ -1,69 +1,144 @@
 # define env variable
 ARG INSTALL_CRON=1
 ARG INSTALL_COMPOSER=1
-ARG PHP_VERSION
+ARG NODE_VERSION
 ARG GLOBAL_VERSION
 
-FROM arm64v8/ubuntu:20.04
+FROM arm64v8/debian:bullseye-slim
 
+LABEL authors="Justin Essosolam POTCHONA  <potchjust@gmail.com>"
 
-LABEL authors="Justin Essosolam POTCHONA <potchjust@gmail.com>"
-
-# Fixes some weird terminal issues such as broken clear / CTRL+L
-#ENV TERM=linux
-
-# Ensure apt doesn't ask questions when installing stuff
-ENV DEBIAN_FRONTEND=noninteractive
-
-ARG PHP_VERSION
-ENV PHP_VERSION=8.1
-
-# Install php an other packages
 # |--------------------------------------------------------------------------
-# | Main PHP extensions
+# | Required libraries
 # |--------------------------------------------------------------------------
 # |
-# | Installs the main PHP extensions
+# | Installs required libraries.
 # |
 
-# Install php an other packages
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends gnupg \
-    && echo "deb http://ppa.launchpad.net/ondrej/php/ubuntu focal main" > /etc/apt/sources.list.d/ondrej-php.list \
-    && apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 4F4EA0AAE5267A6C \
-    && apt-get update \
-    && apt-get upgrade -y \
-    && apt-get install -y --no-install-recommends \
-        git \
-        nano \
-        sudo \
-        iproute2 \
-        openssh-client \
-        procps \
-        unzip \
-        ca-certificates \
-        curl \
-        php${PHP_VERSION}-cli \
-        php${PHP_VERSION}-curl \
-        php${PHP_VERSION}-mbstring \
-        php${PHP_VERSION}-opcache \
-        php${PHP_VERSION}-readline \
-        php${PHP_VERSION}-xml \
-        php${PHP_VERSION}-zip \
-   && if [[ "${PHP_VERSION}" =~ ^7 ]]; then apt-get install -y --no-install-recommends php${PHP_VERSION}-json; fi \
-      && if [[ "${PHP_VERSION}" =~ ^8 ]]; then apt-get install -y --no-install-recommends php${PHP_VERSION}-json; fi \
-      && apt-get clean \
-      && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /usr/share/doc/*
+RUN apt-get update &&\
+    apt-get install -y --no-install-recommends curl git nano sudo ca-certificates procps libfontconfig --no-install-recommends
 
- # add user to the docker file with sudo right ( It will be docker in our use case \
+# |--------------------------------------------------------------------------
+# | Supercronic
+# |--------------------------------------------------------------------------
+# |
+# | Supercronic is a drop-in replacement for cron (for containers).
+# |
 
-RUN useradd -ms /bin/bash docker && adduser docker sudo
-# Users in the sudoers group can sudo as root without password.
-RUN echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
+RUN SUPERCRONIC_URL=https://github.com/aptible/supercronic/releases/download/v0.2.1/supercronic-linux-arm64 \
+ && SUPERCRONIC=supercronic-linux-arm64 \
+ && SUPERCRONIC_SHA1SUM=0003a1f84a4bc547b6ff3d88347916e4b96a2177 \
+ && curl -fsSLO "$SUPERCRONIC_URL" \
+ && echo "${SUPERCRONIC_SHA1SUM}  ${SUPERCRONIC}" | sha1sum -c - \
+ && chmod +x "$SUPERCRONIC" \
+ && mv "$SUPERCRONIC" "/usr/local/bin/${SUPERCRONIC}" \
+ && ln -s "/usr/local/bin/${SUPERCRONIC}" /usr/local/bin/supercronic
 
-#install composer on the computer
+ # |--------------------------------------------------------------------------
+ # | User
+ # |--------------------------------------------------------------------------
+ # |
+ # | Define a default user with sudo rights.
+ # |
 
-#ENV COMPOSER_ALLOW_SUPERUSER 1
+ RUN useradd -ms /bin/bash docker && adduser docker sudo
+ # Users in the sudoers group can sudo as root without password.
+ RUN echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
 
-RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer &&\
-    chmod +x /usr/local/bin/composer
+
+
+
+# |--------------------------------------------------------------------------
+# | NodeJS
+# |--------------------------------------------------------------------------
+# |
+# | Installs NodeJS and npm.
+# |
+
+RUN apt-get update &&\
+    apt-get install -y --no-install-recommends gnupg &&\
+    curl -sL https://deb.nodesource.com/setup_18.x | bash - &&\
+    apt-get update &&\
+    apt-get install -y --no-install-recommends nodejs
+
+# |--------------------------------------------------------------------------
+# | yarn
+# |--------------------------------------------------------------------------
+# |
+# | Installs yarn. It provides some nice improvements over npm.
+# |
+
+RUN curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add - &&\
+    echo "deb https://dl.yarnpkg.com/debian/ stable main" | tee /etc/apt/sources.list.d/yarn.list &&\
+    apt-get update &&\
+    apt-get install -y --no-install-recommends yarn
+
+# |--------------------------------------------------------------------------
+# | PATH updating
+# |--------------------------------------------------------------------------
+# |
+# | Let's add ./node_modules/.bin to the PATH (utility function to use NPM bin easily)
+# |
+
+ENV PATH="$PATH:./node_modules/.bin"
+RUN sed -i 's#/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin#/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:./node_modules/.bin#g' /etc/sudoers
+
+USER docker
+# |--------------------------------------------------------------------------
+# | SSH client
+# |--------------------------------------------------------------------------
+# |
+# | Let's set-up the SSH client (for connections to private git repositories)
+# | We create an empty known_host file and we launch the ssh-agent
+# |
+
+RUN mkdir ~/.ssh && touch ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts && eval $(ssh-agent -s)
+
+# |--------------------------------------------------------------------------
+# | .bashrc updating
+# |--------------------------------------------------------------------------
+# |
+# | Let's update the .bashrc to add nice aliases
+# |
+RUN { \
+        echo "alias ls='ls --color=auto'"; \
+        echo "alias ll='ls --color=auto -alF'"; \
+        echo "alias la='ls --color=auto -A'"; \
+        echo "alias l='ls --color=auto -CF'"; \
+    } >> ~/.bashrc
+
+USER root
+
+
+# |--------------------------------------------------------------------------
+# | Entrypoint
+# |--------------------------------------------------------------------------
+# |
+# | Defines the entrypoint.
+# |
+
+ENV NODE_VERSION=18.x
+
+
+RUN mkdir -p /usr/src/app && chown docker:docker /usr/src/app
+WORKDIR /usr/src/app
+
+
+# Add Tini (to be able to stop the container with ctrl-c.
+# See: https://github.com/krallin/tini
+ENV TINI_VERSION v0.19.0
+ADD https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini-arm64 /tini
+RUN chmod +x /tini
+
+COPY conf/docker-entrypoint.sh /usr/local/bin/
+COPY conf/docker-entrypoint-as-root.sh /usr/local/bin/
+COPY conf/startup_commands.js /usr/local/bin/startup_commands.js
+COPY conf/generate_cron.js /usr/local/bin/generate_cron.js
+
+
+CMD [ "node" ]
+
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+
+USER docker
